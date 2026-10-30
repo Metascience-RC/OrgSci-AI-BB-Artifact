@@ -1,0 +1,153 @@
+---
+title: "Dataset sample generation"
+author: ""
+format: html
+editor: source
+---
+
+## Setup
+
+Load up settings for this script
+
+```{r}
+#| echo: false
+rm(list=ls())
+
+library(tidyverse)
+
+path <- file.path("C:","Users","User","Box","Metascience","Sample data") #change filepath as necessary
+
+winning_team <- "009" #which team do we want to look at - with full dataset can examine non-winners, in sample only winner data included
+division_unit_1 = 0.1 #use to determine resolution of binning
+division_unit_2 = 1000
+
+```
+
+## Load essential files
+
+```{r}
+#| echo: false
+
+setwd(path)
+
+#survey data - pre-sampled, the code in this file will work on the complete survey data when published
+
+survey_data <- read_csv("sample_human_survey_data.csv", show_col_types = FALSE)
+
+#data from the winning tool - pre-sampled, results from lower-placed teams pre-removed
+
+tool_results <- read_csv("Algorithms_Merged.csv", show_col_types = FALSE)
+
+#sampling settings
+
+conversion_table <- read_csv("sampling_table.csv", show_col_types = FALSE)
+
+#OpenAlex data - for speed the Rds file only contains full bibliometric data for the sample
+
+OA_data <- readRDS("OA_data.Rds") #this data was generated before the recent OpenAlex topic update, so an additional file is needed for up-to-date topic data
+OA_subject_data <- read_csv("OA_flat_subject_data.csv", show_col_types = FALSE) #updated topic data - included in the output data
+
+#data provided by winning team indicating full text status
+
+ft <- read_csv("full_text_status.csv", show_col_types = FALSE)
+
+#minor data shaping
+
+OA_data <- OA_data %>% select(-Keywords,-domain,-field,-subfield,-topic) %>% #remove outdated topic data (pre-OpenAlex update)
+  distinct(DOI, .keep_all = TRUE) #at the time this was generated OA occasionally had multiple items with the same DOI, remove duplicates
+
+OA_data <- full_join(OA_data,OA_subject_data, by = "DOI") %>% #add in current topic data
+  select(PaperProjectID,DOI,OpenAlexID,Title,Date,topics) %>% 
+  rename(Paper_ID = PaperProjectID) %>%
+  mutate(Date = as_date(parse_date_time(Date, orders = c("ymd","dmy")))) #standardise date formats
+
+ft <- ft %>% filter(str_detect(category,"fulltext_cc_by"))
+
+ft_slim <- ft %>% select(doi)
+
+tool_results <- tool_results %>%
+  select(`DOI (as URL)`,
+         contains(paste0("Converted_",winning_team)),
+         contains(paste0("Raw_Certainty_",winning_team))) %>% #retain DOI and scores for winning team only
+  rename(DOI = `DOI (as URL)`) %>%
+  rename(team_score = contains("Converted")) %>%
+  rename(team_bounds = contains("Certainty")) %>% #rename columns
+  select(-team_bounds) #remove a column unused in final output
+
+```
+
+## Small sample from human data (selection on human data)
+
+10 publications of human data, or 1000 of tool
+
+```{r}
+#| echo: false
+
+setwd(path)
+
+#set output filenames
+
+filename <- "org_sci_sample_fresh_generation.csv"
+filename_survey_sample <- "org_sci_sample_survey_only.csv"
+
+#furnish survey data with additional fields
+
+survey_data_furnished <- survey_data %>%
+  select(DOI, n_raters, novel_quant_median, novel_quant_std, novel_quant_range) %>%
+  rename(NumExpertRaters = n_raters, Expert_Median = novel_quant_median, Expert_StdDev = novel_quant_std, Expert_Range = novel_quant_range)
+
+survey_data_furnished <- survey_data_furnished %>%
+  left_join(OA_data, by = "DOI") %>%
+  relocate(Title,Date, .before = NumExpertRaters) %>%
+  relocate(OpenAlexID, .after = DOI) %>%
+  relocate(Paper_ID)
+
+survey_data_furnished <- survey_data_furnished %>%
+  filter(NumExpertRaters > 1)
+
+#restrict team data to publications where full texts were available, and where human data had multiple raters
+
+tool_results <- tool_results %>%
+  semi_join(ft_slim, by = join_by(DOI == doi)) %>% #full text
+  filter(DOI %in% survey_data_furnished$DOI)
+
+#add a converted score
+
+tool_results <- tool_results %>%
+    mutate(team_score_conversion = pmin(floor(team_score/division_unit_1) + 1,
+      division_unit_2))
+  
+#label by bin
+  
+tool_results <- tool_results %>%
+    mutate(category = ifelse(team_score_conversion %in% conversion_table[[1,3]]:conversion_table[[1,4]],conversion_table[[1,1]], #negligible category - lower bound, upper bound, label
+                             ifelse(team_score_conversion %in% conversion_table[[2,3]]:conversion_table[[2,4]],conversion_table[[2,1]], #routine
+                                    ifelse(team_score_conversion %in% conversion_table[[3,3]]:conversion_table[[3,4]],conversion_table[[3,1]], #incremental
+                                           ifelse(team_score_conversion %in% conversion_table[[4,3]]:conversion_table[[4,4]],conversion_table[[4,1]], #solid
+                                                  ifelse(team_score_conversion %in% conversion_table[[5,3]]:conversion_table[[5,4]],conversion_table[[5,1]], #field-defining
+                                                         ifelse(team_score_conversion %in% conversion_table[[6,3]]:conversion_table[[6,4]],conversion_table[[6,1]],"error"))))))) #paradigm-shifting
+  
+#sample by bin
+  
+tool_results_sample <- tool_results %>%
+    left_join(conversion_table, by = join_by(category == category_name)) %>%
+    group_by(category) %>%
+    group_modify(~ slice_sample(.x, n = first(.x$desired_sample))) %>% #modify the entire group - output tbl, apply function slice sample to self
+    arrange(team_score_conversion)
+  
+#combine datasets and convert to output format
+
+tool_results_sample <- tool_results_sample %>%
+    select(-team_score_conversion,-desired_sample,-lower_bound,-upper_bound) %>% #remove conversion table data
+    relocate(DOI,team_score,category)
+  
+combined_sample <- left_join(tool_results_sample,survey_data_furnished, by = "DOI") %>% 
+  relocate(team_score,category, .after = Expert_Range) %>% distinct(DOI, .keep_all = TRUE) %>%
+  add_column(Shibayama_q100 = "", Shibayama_q90 = "", Matsumoto = "", Leahey = "")
+
+#write outputs
+
+write_excel_csv(combined_sample,filename)
+write_excel_csv(survey_data_furnished,filename_survey_sample)
+
+```

@@ -1,0 +1,7 @@
+﻿category_name,desired_sample,lower_bound,upper_bound
+Negligible (0-0.2% of results),2,1,150
+Routine (0.3%-11% of results),110,151,400
+Solid but Incremental (11.1-77.5% of results),775,401,600
+Strong (77.6-99% of results),111,601,800
+Field-shaping (99-99.9% of results),2,801,940
+Paradigm-shifting (over 99.9% of results),0,941,1000
